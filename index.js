@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { SubBots } from 'meowsab';
 import dotenv from 'dotenv';
+import { SubBots } from 'meowsab';
+import { downloadContentFromMessage } from '@whiskeysockets/baileys';
 
 dotenv.config();
 
@@ -78,41 +79,7 @@ function scorePattern(num) {
   return score;
 }
 
-async function getFileTextFromMessage(msg) {
-  const doc =
-    msg.message?.documentMessage ||
-    msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.documentMessage;
-
-  if (!doc) return null;
-
-  const fileName = doc.fileName || `input_${Date.now()}.txt`;
-  const savePath = path.join(configData.UPLOAD_DIR, fileName);
-
-  if (msg.message?.documentMessage?.fileName && msg.message?.documentMessage?.mimetype) {
-    if (msg.message.documentMessage.mimetype !== 'text/plain' && !fileName.endsWith('.txt')) return null;
-  }
-
-  return savePath;
-}
-
-async function saveIncomingTextFile(sock, msg) {
-  const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-  const doc = msg.message?.documentMessage || quoted?.documentMessage;
-  if (!doc) return null;
-
-  const jid = msg.key.remoteJid;
-  const fileName = doc.fileName || `input_${Date.now()}.txt`;
-  const outPath = path.join(configData.UPLOAD_DIR, fileName);
-
-  const buffer = await downloadDocumentFromMessage(msg, sock);
-  if (!buffer) return null;
-
-  fs.writeFileSync(outPath, buffer);
-  return outPath;
-}
-
-async function downloadDocumentFromMessage(msg, sock) {
-  const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
+async function downloadDocumentBuffer(msg) {
   const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
   const doc = msg.message?.documentMessage || quoted?.documentMessage;
   if (!doc) return null;
@@ -123,11 +90,19 @@ async function downloadDocumentFromMessage(msg, sock) {
   return Buffer.concat(chunks);
 }
 
-async function listAdmins(sock, groupJid) {
-  const meta = await sock.groupMetadata(groupJid);
-  return meta.participants
-    .filter(p => p.admin === 'admin' || p.admin === 'superadmin')
-    .map(p => p.id);
+async function saveIncomingTextFile(msg) {
+  const doc = msg.message?.documentMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.documentMessage;
+  if (!doc) return null;
+
+  fs.mkdirSync(configData.UPLOAD_DIR, { recursive: true });
+  const fileName = doc.fileName || `input_${Date.now()}.txt`;
+  const outPath = path.join(configData.UPLOAD_DIR, fileName);
+
+  const buffer = await downloadDocumentBuffer(msg);
+  if (!buffer) return null;
+
+  fs.writeFileSync(outPath, buffer);
+  return outPath;
 }
 
 let stopScan = false;
@@ -171,7 +146,7 @@ async function waitTurn() {
 }
 
 function saveList(fileName, arr) {
-  ensureDirs();
+  fs.mkdirSync(path.dirname(fileName), { recursive: true });
   fs.writeFileSync(fileName, arr.join('
 ') + (arr.length ? '
 ' : ''), 'utf8');
@@ -204,7 +179,7 @@ async function scanNumbers(sock, numbers, onProgress, onPauseNotify) {
         notFound.push(raw);
         stats.notFound++;
       }
-    } catch (e) {
+    } catch {
       stats.errors++;
       notFound.push(raw);
       if (stats.errors >= 5) {
@@ -236,98 +211,98 @@ async function handleNumberCommand(sock, msg, cmd, args) {
     return sock.sendMessage(jid, { text: '⏹️ تم إيقاف الفحص الحالي.' }, { quoted: msg });
   }
 
-  if (cmd === 'فك' || cmd === 'مميز' || cmd === 'قص' || cmd === 'فحص') {
-    const filePath = await saveIncomingTextFile(sock, msg);
-    if (!filePath && cmd !== 'خلاص') {
-      return sock.sendMessage(jid, { text: 'الرجاء الرد على ملف txt أولاً.' }, { quoted: msg });
+  const filePath = await saveIncomingTextFile(msg);
+  if (!filePath && cmd !== 'خلاص') {
+    return sock.sendMessage(jid, { text: 'الرجاء الرد على ملف txt أولاً.' }, { quoted: msg });
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8');
+  const allNumbers = extractNumbersFromText(content);
+
+  if (cmd === 'فك') {
+    const outPath = path.join(configData.OUTPUT_DIR, 'numbers_with_plus.txt');
+    const out = allNumbers.map(n => n.startsWith('+') ? n : `+${n.replace(/D/g, '')}`);
+    saveList(outPath, out);
+    return sock.sendMessage(jid, {
+      document: fs.readFileSync(outPath),
+      fileName: 'numbers_with_plus.txt',
+      mimetype: 'text/plain',
+      caption: `✅ تم استخراج ${out.length} رقم.`
+    }, { quoted: msg });
+  }
+
+  if (cmd === 'مميز') {
+    const map = new Map();
+    for (const n of allNumbers) {
+      if (isPatternNumber(n)) map.set(n, (map.get(n) || 0) + 1);
     }
 
-    const content = fs.readFileSync(filePath, 'utf8');
-    const allNumbers = extractNumbersFromText(content);
+    const data = [...map.entries()]
+      .map(([num, count]) => ({ num, count, score: scorePattern(num) }))
+      .sort((a, b) => b.score - a.score || b.count - a.count);
 
-    if (cmd === 'فك') {
-      const outPath = path.join(configData.OUTPUT_DIR, 'numbers_with_plus.txt');
-      const out = allNumbers.map(n => n.startsWith('+') ? n : `+${n.replace(/D/g, '')}`);
-      saveList(outPath, out);
-      return sock.sendMessage(jid, {
-        document: fs.readFileSync(outPath),
-        fileName: 'numbers_with_plus.txt',
-        mimetype: 'text/plain',
-        caption: `✅ تم استخراج ${out.length} رقم.`
-      }, { quoted: msg });
-    }
-
-    if (cmd === 'مميز') {
-      const map = new Map();
-      for (const n of allNumbers) {
-        if (isPatternNumber(n)) map.set(n, (map.get(n) || 0) + 1);
-      }
-      const data = [...map.entries()]
-        .map(([num, count]) => ({ num, count, score: scorePattern(num) }))
-        .sort((a, b) => b.score - a.score || b.count - a.count);
-
-      const txt = data.length
-        ? data.map((x, i) => `${i + 1}. ${x.num} | تكرار: ${x.count} | نقاط: ${x.score}`).join('
+    const txt = data.length
+      ? data.map((x, i) => `${i + 1}. ${x.num} | تكرار: ${x.count} | نقاط: ${x.score}`).join('
 ')
-        : 'لا توجد أرقام مميزة.';
+      : 'لا توجد أرقام مميزة.';
 
-      return sock.sendMessage(jid, { text: txt }, { quoted: msg });
+    return sock.sendMessage(jid, { text: txt }, { quoted: msg });
+  }
+
+  if (cmd === 'قص') {
+    const prefix = args.join(' ').trim();
+    if (!prefix) {
+      return sock.sendMessage(jid, { text: 'اكتب البادئة المطلوبة مثل: .قص 96659' }, { quoted: msg });
     }
 
-    if (cmd === 'قص') {
-      const prefix = args.join(' ').trim();
-      if (!prefix) {
-        return sock.sendMessage(jid, { text: 'اكتب البادئة المطلوبة مثل: .قص 96659' }, { quoted: msg });
-      }
+    const cut = [...new Set(allNumbers.filter(n => n.replace(/D/g, '').startsWith(prefix)))];
+    const outPath = path.join(configData.OUTPUT_DIR, `cut_${prefix}.txt`);
+    saveList(outPath, cut);
 
-      const cut = [...new Set(allNumbers.filter(n => n.replace(/D/g, '').startsWith(prefix)))];
-      const outPath = path.join(configData.OUTPUT_DIR, `cut_${prefix}.txt`);
-      saveList(outPath, cut);
+    return sock.sendMessage(jid, {
+      document: fs.readFileSync(outPath),
+      fileName: `cut_${prefix}.txt`,
+      mimetype: 'text/plain',
+      caption: `✅ تم قص ${cut.length} رقم يبدأ بـ ${prefix}`
+    }, { quoted: msg });
+  }
 
-      return sock.sendMessage(jid, {
-        document: fs.readFileSync(outPath),
-        fileName: `cut_${prefix}.txt`,
-        mimetype: 'text/plain',
-        caption: `✅ تم قص ${cut.length} رقم يبدأ بـ ${prefix}`
-      }, { quoted: msg });
-    }
-
-    if (cmd === 'فحص') {
-      resetStop();
-      const result = await scanNumbers(
-        sock,
-        allNumbers,
-        async (stats) => {
-          if (stats.checked % 20 === 0) {
-            await sock.sendMessage(jid, {
-              text: `⏳ جارٍ الفحص...
+  if (cmd === 'فحص') {
+    resetStop();
+    const result = await scanNumbers(
+      sock,
+      allNumbers,
+      async (stats) => {
+        if (stats.checked % 20 === 0) {
+          await sock.sendMessage(jid, {
+            text: `⏳ جارٍ الفحص...
 تم فحص: ${stats.checked}
 موجود: ${stats.found}
 غير موجود: ${stats.notFound}`
-            }, { quoted: msg });
-          }
-        },
-        async (note) => {
-          await sock.sendMessage(jid, { text: note }, { quoted: msg });
+          }, { quoted: msg });
         }
-      );
+      },
+      async (note) => {
+        await sock.sendMessage(jid, { text: note }, { quoted: msg });
+      }
+    );
 
-      const outPath = path.join(configData.OUTPUT_DIR, 'الأرقام_غير_الموجودة.txt');
-      saveList(outPath, result.notFound);
+    const outPath = path.join(configData.OUTPUT_DIR, 'الأرقام_غير_الموجودة.txt');
+    saveList(outPath, result.notFound);
 
-      return sock.sendMessage(jid, {
-        text: `✅ انتهى الفحص.
+    return sock.sendMessage(jid, {
+      text: `✅ انتهى الفحص.
 تم فحص: ${result.stats.checked}
 موجودة: ${result.stats.found}
 غير موجودة: ${result.stats.notFound}
 ${result.stats.stopped ? '⏹️ تم الإيقاف/التبريد مؤقتًا.' : ''}`
-      }, { quoted: msg });
-    }
+    }, { quoted: msg });
   }
 }
 
-async function sub(client) {
+async function main(client) {
   ensureDirs();
+
   global.subBots = new SubBots(client.commandSystem);
   SubBots.pariCode(configData.PASSWORD);
 
@@ -358,7 +333,7 @@ async function sub(client) {
   const loadedCount = await global.subBots.load();
   console.log(`✅ Loaded ${loadedCount} saved bots`);
 
-  global.subBots.on('ready', async (uid, sock) => {
+  global.subBots.on('ready', async (uid) => {
     console.log(`✅ [SubBot ${uid}] Connected!`);
   });
 
@@ -443,4 +418,4 @@ function getMessageText(msg) {
   return msg.body || null;
 }
 
-export default sub;
+export default main;
