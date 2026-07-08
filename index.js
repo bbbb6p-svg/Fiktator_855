@@ -55,7 +55,7 @@ function normalizeNumber(num) {
 }
 
 function extractNumbersFromText(text) {
-  const matches = String(text || '').match(/(?:+?d[ds-]{6,}d)/g) || [];
+  const matches = String(text || '').match(/+?d[ds-]{6,}d/g) || [];
   return [...new Set(matches.map(normalizeNumber))];
 }
 
@@ -63,7 +63,7 @@ function isPatternNumber(num) {
   const s = String(num).replace(/D/g, '');
   if (!s) return false;
   if (/(.)\u0001{4,}/.test(s)) return true;
-  if (/(d)\u0001{2,}/.test(s)) return true;
+  if (/(.)\u0001{2,}/.test(s)) return true;
   if (/12345|23456|34567|45678|56789/.test(s)) return true;
   if (/(d{2})\u0001{2,}/.test(s)) return true;
   return false;
@@ -72,7 +72,7 @@ function isPatternNumber(num) {
 function scorePattern(num) {
   const s = String(num).replace(/D/g, '');
   let score = 0;
-  const repeats = s.match(/(d)\u0001+/g) || [];
+  const repeats = s.match(/(.)\u0001+/g) || [];
   for (const r of repeats) score += r.length * 10;
   if (/12345|23456|34567|45678|56789/.test(s)) score += 50;
   if (/(d{2})\u0001{2,}/.test(s)) score += 40;
@@ -136,10 +136,12 @@ function isPaused() {
 async function waitTurn() {
   const now = Date.now();
   while (scanWindow.length && now - scanWindow[0] > SCAN_PERIOD_MS) scanWindow.shift();
+
   if (scanWindow.length < MAX_SCAN_REQ) {
     scanWindow.push(Date.now());
     return;
   }
+
   const wait = Math.max(0, SCAN_PERIOD_MS - (now - scanWindow[0]));
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   return waitTurn();
@@ -179,9 +181,10 @@ async function scanNumbers(sock, numbers, onProgress, onPauseNotify) {
         notFound.push(raw);
         stats.notFound++;
       }
-    } catch {
+    } catch (error) {
       stats.errors++;
       notFound.push(raw);
+
       if (stats.errors >= 5) {
         pauseScan(10 * 60 * 1000);
         stats.stopped = true;
@@ -221,18 +224,24 @@ async function handleNumberCommand(sock, msg, cmd, args) {
 
   if (cmd === 'فك') {
     const outPath = path.join(configData.OUTPUT_DIR, 'numbers_with_plus.txt');
-    const out = allNumbers.map(n => n.startsWith('+') ? n : `+${n.replace(/D/g, '')}`);
+    const out = allNumbers.map(n => (n.startsWith('+') ? n : `+${n.replace(/D/g, '')}`));
     saveList(outPath, out);
-    return sock.sendMessage(jid, {
-      document: fs.readFileSync(outPath),
-      fileName: 'numbers_with_plus.txt',
-      mimetype: 'text/plain',
-      caption: `✅ تم استخراج ${out.length} رقم.`
-    }, { quoted: msg });
+
+    return sock.sendMessage(
+      jid,
+      {
+        document: fs.readFileSync(outPath),
+        fileName: 'numbers_with_plus.txt',
+        mimetype: 'text/plain',
+        caption: `✅ تم استخراج ${out.length} رقم.`
+      },
+      { quoted: msg }
+    );
   }
 
   if (cmd === 'مميز') {
     const map = new Map();
+
     for (const n of allNumbers) {
       if (isPatternNumber(n)) map.set(n, (map.get(n) || 0) + 1);
     }
@@ -259,27 +268,36 @@ async function handleNumberCommand(sock, msg, cmd, args) {
     const outPath = path.join(configData.OUTPUT_DIR, `cut_${prefix}.txt`);
     saveList(outPath, cut);
 
-    return sock.sendMessage(jid, {
-      document: fs.readFileSync(outPath),
-      fileName: `cut_${prefix}.txt`,
-      mimetype: 'text/plain',
-      caption: `✅ تم قص ${cut.length} رقم يبدأ بـ ${prefix}`
-    }, { quoted: msg });
+    return sock.sendMessage(
+      jid,
+      {
+        document: fs.readFileSync(outPath),
+        fileName: `cut_${prefix}.txt`,
+        mimetype: 'text/plain',
+        caption: `✅ تم قص ${cut.length} رقم يبدأ بـ ${prefix}`
+      },
+      { quoted: msg }
+    );
   }
 
   if (cmd === 'فحص') {
     resetStop();
+
     const result = await scanNumbers(
       sock,
       allNumbers,
       async (stats) => {
         if (stats.checked % 20 === 0) {
-          await sock.sendMessage(jid, {
-            text: `⏳ جارٍ الفحص...
+          await sock.sendMessage(
+            jid,
+            {
+              text: `⏳ جارٍ الفحص...
 تم فحص: ${stats.checked}
 موجود: ${stats.found}
 غير موجود: ${stats.notFound}`
-          }, { quoted: msg });
+            },
+            { quoted: msg }
+          );
         }
       },
       async (note) => {
@@ -290,14 +308,27 @@ async function handleNumberCommand(sock, msg, cmd, args) {
     const outPath = path.join(configData.OUTPUT_DIR, 'الأرقام_غير_الموجودة.txt');
     saveList(outPath, result.notFound);
 
-    return sock.sendMessage(jid, {
-      text: `✅ انتهى الفحص.
+    return sock.sendMessage(
+      jid,
+      {
+        text: `✅ انتهى الفحص.
 تم فحص: ${result.stats.checked}
 موجودة: ${result.stats.found}
 غير موجودة: ${result.stats.notFound}
 ${result.stats.stopped ? '⏹️ تم الإيقاف/التبريد مؤقتًا.' : ''}`
-    }, { quoted: msg });
+      },
+      { quoted: msg }
+    );
   }
+}
+
+function getMessageText(msg) {
+  if (!msg.message) return null;
+  if (msg.message.conversation) return msg.message.conversation;
+  if (msg.message.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
+  if (msg.message.imageMessage?.caption) return msg.message.imageMessage.caption;
+  if (msg.message.videoMessage?.caption) return msg.message.videoMessage.caption;
+  return msg.body || null;
 }
 
 async function main(client) {
@@ -351,8 +382,9 @@ async function main(client) {
 
     try {
       const clean = body.trim();
-      const cmd = clean.replace(/^./, '').split(/s+/)[0];
-      const args = clean.split(/s+/).slice(1);
+      const withoutPrefix = clean.startsWith('.') ? clean.slice(1) : clean;
+      const cmd = withoutPrefix.split(/s+/)[0];
+      const args = withoutPrefix.split(/s+/).slice(1);
 
       if (clean === 'تست') {
         await sock.sendMessage(msg.key.remoteJid, {
@@ -361,9 +393,11 @@ async function main(client) {
       }
 
       if (clean === 'اوامر' || clean === '.اوامر' || clean === 'بوت') {
-        await sock.sendMessage(msg.key.remoteJid, {
-          image: { url: configData.WELCOME_IMAGES[0] },
-          caption: `*مرحباً بك يا @${msg.pushName || 'User'} 👋*
+        await sock.sendMessage(
+          msg.key.remoteJid,
+          {
+            image: { url: configData.WELCOME_IMAGES[0] },
+            caption: `*مرحباً بك يا @${msg.pushName || 'User'} 👋*
 
 اهلاً وسهلاً بك في بوت ${configData.RIGHTS} نواتك الرقميه في المهام المطوره،
 
@@ -380,8 +414,10 @@ async function main(client) {
 
 > اضغط على زر القسم لعرض الاوامر
 بوت ${configData.RIGHTS}`,
-          mentions: [msg.key.participant || msg.key.remoteJid]
-        }, { quoted: msg });
+            mentions: [msg.key.participant || msg.key.remoteJid]
+          },
+          { quoted: msg }
+        );
       }
 
       if (['فك', 'مميز', 'قص', 'فحص', 'خلاص'].includes(cmd)) {
@@ -407,15 +443,6 @@ async function main(client) {
   });
 
   return global.subBots;
-}
-
-function getMessageText(msg) {
-  if (!msg.message) return null;
-  if (msg.message.conversation) return msg.message.conversation;
-  if (msg.message.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
-  if (msg.message.imageMessage?.caption) return msg.message.imageMessage.caption;
-  if (msg.message.videoMessage?.caption) return msg.message.videoMessage.caption;
-  return msg.body || null;
 }
 
 export default main;
